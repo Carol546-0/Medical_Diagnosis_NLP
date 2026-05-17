@@ -1,0 +1,482 @@
+!pip install sentence-transformers rapidfuzz spacy
+
+!python -m spacy download en_core_web_sm
+# =========================================
+# NLP SYMPTOM EXTRACTION PIPELINE
+# =========================================
+# Pipeline:
+# 1. Regex cleaning
+# 2. Tokenization
+# 3. Stop word removal
+# 4. Lemmatization
+# 5. Negation handling
+# 6. Exact matching
+# 7. Synonym matching
+# 8. Fuzzy matching
+# 9. Embedding matching
+# 10. Convert to 0/1 symptom vector
+# =========================================
+
+
+# =========================================
+# 1. INSTALL LIBRARIES
+# =========================================
+
+
+
+
+# =========================================
+# 2. IMPORT LIBRARIES
+# =========================================
+
+import re
+import pickle
+import numpy as np
+import pandas as pd
+
+from rapidfuzz import fuzz
+
+from sentence_transformers import (
+    SentenceTransformer,
+    util
+)
+
+from sklearn.feature_extraction.text import (
+    ENGLISH_STOP_WORDS
+)
+
+import spacy
+
+
+# =========================================
+# 3. LOAD SPACY MODEL
+# =========================================
+
+# Used for tokenization + lemmatization
+nlp = spacy.load("en_core_web_sm")
+
+
+# =========================================
+# 4. LOAD TRAINED FILES
+# =========================================
+
+model = pickle.load(
+    open("/content/disease_model2.pkl", "rb")
+)
+
+encoder = pickle.load(
+    open("/content/label_encoder2.pkl", "rb")
+)
+
+symptom_columns = pickle.load(
+    open("/content/symptom_columns2.pkl", "rb")
+)
+
+
+# =========================================
+# 5. LOAD EMBEDDING MODEL
+# =========================================
+
+embedder = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
+
+
+# =========================================
+# 6. NORMALIZE SYMPTOM NAMES
+# =========================================
+
+def normalize_symptom_name(symptom):
+
+    symptom = str(symptom).lower()
+
+    symptom = symptom.replace("_", " ")
+
+    symptom = symptom.replace("-", " ")
+
+    symptom = re.sub(
+        r"\s+",
+        " ",
+        symptom
+    ).strip()
+
+    return symptom
+
+
+# =========================================
+# 7. CLEAN TEXT
+# =========================================
+
+def clean_text(text):
+
+    # lowercase
+    text = str(text).lower()
+
+    # remove punctuation/numbers
+    text = re.sub(
+        r"[^a-z\s]",
+        " ",
+        text
+    )
+
+    # remove extra spaces
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    return text
+
+
+# =========================================
+# 8. LEMMATIZATION
+# =========================================
+
+def lemmatize_text(text):
+
+    doc = nlp(text)
+
+    lemmas = []
+
+    for token in doc:
+
+        lemma = token.lemma_.strip()
+
+        if lemma != "":
+            lemmas.append(lemma)
+
+    return " ".join(lemmas)
+
+
+# =========================================
+# 9. STOP WORD REMOVAL
+# =========================================
+
+# Keep important medical negation words
+KEEP_WORDS = {
+    "no",
+    "not",
+    "without"
+}
+
+def remove_stopwords(text):
+
+    words = text.split()
+
+    cleaned_words = []
+
+    for word in words:
+
+        if (
+            word not in ENGLISH_STOP_WORDS
+            or word in KEEP_WORDS
+        ):
+            cleaned_words.append(word)
+
+    return " ".join(cleaned_words)
+
+
+# =========================================
+# 10. NEGATION WORDS
+# =========================================
+
+NEGATION_WORDS = {
+    "no",
+    "not",
+    "without",
+    "dont",
+    "don't",
+    "doesnt",
+    "doesn't"
+}
+
+
+# =========================================
+# 11. SYNONYM DICTIONARY
+# =========================================
+
+SYMPTOM_SYNONYMS = {
+    "cough": ["coughing", "couhghing"],
+    "sharp_chest_pain": ["chest pain", "pain in chest", "chest discomfort"],
+    "shortness_of_breath": ["difficulty breathing", "hard to breathe", "breathlessness"],
+    "dizziness": ["dizzy", "lightheaded"],
+    "fatigue": ["tired", "exhausted", "low energy"],
+    "palpitations": ["heart racing", "fast heartbeat"],
+    "disturbance_of_memory": ["confusion", "forgetting things"],
+    "abnormal_involuntary_movements": ["tremors", "shaking", "hands shake"],
+    "difficulty_speaking": ["slurred speech"]
+}
+
+# =========================================
+# 12. PREPARE EMBEDDINGS
+# =========================================
+
+symptom_texts = [
+    normalize_symptom_name(s)
+    for s in symptom_columns
+]
+
+symptom_embeddings = embedder.encode(
+    symptom_texts,
+    convert_to_tensor=True,
+    normalize_embeddings=True
+)
+
+
+# =========================================
+# 13. NEGATION DETECTION
+# =========================================
+
+def symptom_is_negated(text, symptom_phrase):
+
+    words = text.split()
+
+    symptom_words = symptom_phrase.split()
+
+    for i in range(len(words)):
+
+        # check if symptom phrase starts here
+        if words[i:i+len(symptom_words)] == symptom_words:
+
+            # look 3 words before symptom
+            start = max(0, i-3)
+
+            context = words[start:i]
+
+            for word in context:
+
+                if word in NEGATION_WORDS:
+                    return True
+
+    return False
+
+
+# =========================================
+# 14. MAIN NLP PIPELINE
+# =========================================
+def text_to_symptom_vector(
+    user_text,
+    fuzzy_threshold=88,
+    embedding_threshold=0.55
+):
+    # Clean original text
+    cleaned_text = clean_text(user_text)
+
+    # Lemmatized + stopword-removed text
+    lemmatized_text = lemmatize_text(cleaned_text)
+    processed_text = remove_stopwords(lemmatized_text)
+
+    # We will match using BOTH versions
+    texts_to_search = [cleaned_text, processed_text]
+
+    vector = np.zeros(len(symptom_columns), dtype=np.uint8)
+    detected_symptoms = []
+
+    for i, symptom in enumerate(symptom_columns):
+        symptom_text = normalize_symptom_name(symptom)
+        symptom_key = symptom_text.replace(" ", "_")
+
+        # Skip if this symptom is negated in either text version
+        negated = any(
+            symptom_is_negated(t, symptom_text)
+            for t in texts_to_search
+        )
+
+        if negated:
+            continue
+
+        # 1. Exact match
+        for current_text in texts_to_search:
+            if symptom_text in current_text:
+                vector[i] = 1
+                detected_symptoms.append((symptom_text, "exact"))
+                break
+
+        if vector[i] == 1:
+            continue
+
+        # 2. Synonym match
+        synonyms = SYMPTOM_SYNONYMS.get(symptom_key, [])
+
+        matched = False
+
+        for synonym in synonyms:
+            synonym_clean = clean_text(synonym)
+            synonym_processed = remove_stopwords(lemmatize_text(synonym_clean))
+
+            synonym_versions = [synonym_clean, synonym_processed]
+
+            # Check negation for synonym versions
+            synonym_negated = False
+            for t in texts_to_search:
+                for sv in synonym_versions:
+                    if symptom_is_negated(t, sv):
+                        synonym_negated = True
+                        break
+
+            if synonym_negated:
+                continue
+
+            for current_text in texts_to_search:
+                for sv in synonym_versions:
+                    if sv in current_text:
+                        vector[i] = 1
+                        detected_symptoms.append((synonym, "synonym"))
+                        matched = True
+                        break
+
+                if matched:
+                    break
+
+            if matched:
+                break
+
+        if matched:
+            continue
+
+        # 3. Fuzzy match
+        for current_text in texts_to_search:
+            if len(symptom_text) >= 5:
+                score = fuzz.partial_ratio(symptom_text, current_text)
+
+                if score >= fuzzy_threshold:
+                    vector[i] = 1
+                    detected_symptoms.append((symptom_text, "fuzzy"))
+                    break
+
+        # 4. Embedding matching using phrase chunks from original text
+    phrases = re.split(
+        r",| and | but | with | also | along with | plus ",
+        cleaned_text
+    )
+
+    phrases = [
+        p.strip()
+        for p in phrases
+        if len(p.strip()) > 2
+    ]
+
+    if len(phrases) > 0:
+        phrase_embeddings = embedder.encode(
+            phrases,
+            convert_to_tensor=True,
+            normalize_embeddings=True
+        )
+
+        similarity_scores = util.cos_sim(
+            phrase_embeddings,
+            symptom_embeddings
+        )
+
+        for phrase_index, phrase in enumerate(phrases):
+            # Do not embed negated chunks
+            if any(neg in phrase.split() for neg in NEGATION_WORDS):
+                continue
+
+            scores = similarity_scores[phrase_index].cpu().numpy()
+            best_index = int(np.argmax(scores))
+            best_score = float(scores[best_index])
+
+            if best_score >= embedding_threshold:
+                vector[best_index] = 1
+                detected_symptoms.append((phrase, "embedding"))
+
+    return (
+        pd.DataFrame([vector], columns=symptom_columns),
+        detected_symptoms,
+        processed_text
+    )
+
+# =========================================
+# 16. PREDICT TOP 3 DISEASES
+# =========================================
+
+def predict_user_symptoms(user_text):
+    """
+    Takes user symptom text, extracts symptoms, predicts top 3 diseases,
+    and prints a user-friendly medical warning.
+    """
+
+    # Convert user text into 0/1 symptom vector
+    X_user, detected, processed_text = text_to_symptom_vector(user_text)
+
+    # Get detected symptom columns
+    detected_columns = X_user.columns[X_user.iloc[0] == 1].tolist()
+
+    print("\n==============================")
+    print("Prediction Result")
+    print("==============================")
+
+    # If no symptoms detected
+    if len(detected_columns) == 0:
+        print("No known symptoms were detected from your input.")
+        print("Please try writing your symptoms more clearly.")
+        return
+    if len(detected_columns) <= 2 :
+        print("More symptoms are needed for higher confidence.")
+        return
+
+    # Predict probabilities
+    probabilities = model.predict_proba(X_user)[0]
+
+    # Get top 3 disease indices
+    top3_indices = np.argsort(probabilities)[-3:][::-1]
+
+    # Convert top 3 predictions to disease names
+    top_diseases = []
+    top_confidences = []
+
+    for idx in top3_indices:
+        disease = encoder.inverse_transform([idx])[0]
+        confidence = probabilities[idx] * 100
+
+        top_diseases.append(disease)
+        top_confidences.append(confidence)
+
+    # Natural language output
+    print(
+        f"Based on the symptoms you entered, "
+        f"you may have {top_diseases[0]}, {top_diseases[1]}, "
+        f"or {top_diseases[2]}."
+    )
+
+    print("\nConfidence levels:")
+    for disease, confidence in zip(top_diseases, top_confidences):
+        print(f"- {confidence:.2f}% {disease}")
+
+    # Show extracted symptoms
+    print("\nDetected symptoms:")
+    for symptom in detected_columns:
+        print(f"- {normalize_symptom_name(symptom)}")
+
+    # Show processed text
+    print("\nProcessed text:")
+    print(processed_text)
+
+    # Doctor warning
+    print(
+        "\nImportant note: These results are only possible predictions based on symptoms. "
+        "This system is not a medical diagnosis and should not replace professional medical advice. "
+        "Please consult a qualified doctor for accurate diagnosis and treatment."
+    )
+
+
+# =========================================
+# 17. REPEATED USER INPUT LOOP
+# =========================================
+
+while True:
+    print("\n==============================")
+    print("Enter your symptoms or type 'exit' to stop:")
+    user_text = input("Symptoms")
+
+    if user_text.lower().strip() in ["exit", "quit", "stop"]:
+        print("Stopped.")
+        break
+
+    if user_text.strip() == "":
+        print("Please enter symptoms.")
+        continue
+
+    predict_user_symptoms(user_text)

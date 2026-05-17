@@ -1,0 +1,201 @@
+import pandas as pd
+import numpy as np
+import pickle
+
+from sklearn.metrics import accuracy_score, classification_report
+
+# =========================================
+# 1. LOAD FILES
+# =========================================
+
+# Text dataset
+test_df = pd.read_csv("/content/nlp_test_dataset_realistic.csv")
+
+# Trained model
+model = pickle.load(open("/content/disease_model2.pkl", "rb"))
+
+# Label encoder
+encoder = pickle.load(open("/content/label_encoder2.pkl", "rb"))
+
+# Exact symptom columns used during training
+symptom_columns = pickle.load(
+    open("/content/symptom_columns2.pkl", "rb")
+)
+
+print("Rows:", len(test_df))
+print("Symptoms:", len(symptom_columns))
+
+# =========================================
+# 2. REBUILD EMBEDDINGS
+# =========================================
+
+symptom_texts = [
+    normalize_symptom_name(s)
+    for s in symptom_columns
+]
+
+symptom_embeddings = embedder.encode(
+    symptom_texts,
+    convert_to_tensor=True,
+    normalize_embeddings=True
+)
+
+# =========================================
+# 3. OPTIONAL SAMPLE
+# =========================================
+
+# Use sample first for speed
+sample_df = test_df.sample(
+    1000,
+    random_state=42
+).reset_index(drop=True)
+
+# For full dataset later:
+# sample_df = test_df.copy().reset_index(drop=True)
+
+# =========================================
+# 4. PREDICT
+# =========================================
+
+predicted_diseases = []
+confidences = []
+detected_symptoms_list = []
+
+for text in sample_df["text"]:
+
+    # NLP pipeline
+    X_user, detected, processed = text_to_symptom_vector(text)
+
+    # Predict probabilities
+    probabilities = model.predict_proba(X_user)[0]
+
+    # Best prediction
+    best_idx = np.argmax(probabilities)
+
+    predicted_disease = encoder.inverse_transform(
+        [best_idx]
+    )[0]
+
+    confidence = probabilities[best_idx] * 100
+
+    # Save
+    predicted_diseases.append(predicted_disease)
+    confidences.append(confidence)
+
+    detected_columns = X_user.columns[
+        X_user.iloc[0] == 1
+    ].tolist()
+
+    detected_symptoms_list.append(
+        ", ".join(
+            [
+                normalize_symptom_name(s)
+                for s in detected_columns
+            ]
+        )
+    )
+
+# =========================================
+# 5. ADD RESULTS
+# =========================================
+
+sample_df["predicted_disease"] = predicted_diseases
+sample_df["confidence"] = confidences
+sample_df["detected_symptoms"] = detected_symptoms_list
+
+# =========================================
+# 6. ACCURACY
+# =========================================
+
+accuracy = accuracy_score(
+    sample_df["true_disease"],
+    sample_df["predicted_disease"]
+)
+
+print("\n==============================")
+print("DISEASE PREDICTION RESULTS")
+print("==============================")
+
+print(f"Rows tested: {len(sample_df)}")
+print(f"Accuracy: {accuracy * 100:.2f}%")
+
+# =========================================
+# 7. CORRECT / WRONG
+# =========================================
+
+correct_df = sample_df[
+    sample_df["true_disease"]
+    == sample_df["predicted_disease"]
+].copy()
+
+wrong_df = sample_df[
+    sample_df["true_disease"]
+    != sample_df["predicted_disease"]
+].copy()
+
+print("\nCorrect predictions:", len(correct_df))
+print("Wrong predictions:", len(wrong_df))
+
+# =========================================
+# 8. SHOW CORRECT
+# =========================================
+
+print("\n==============================")
+print("SOME CORRECT PREDICTIONS")
+print("==============================")
+
+display(
+    correct_df[
+        [
+            "text",
+            "true_disease",
+            "predicted_disease",
+            "confidence",
+            "detected_symptoms"
+        ]
+    ].head(10)
+)
+
+# =========================================
+# 9. SHOW WRONG
+# =========================================
+
+print("\n==============================")
+print("SOME WRONG PREDICTIONS")
+print("==============================")
+
+display(
+    wrong_df[
+        [
+            "text",
+            "true_disease",
+            "predicted_disease",
+            "confidence",
+            "detected_symptoms"
+        ]
+    ].head(10)
+)
+
+# =========================================
+# 10. SAVE RESULTS
+# =========================================
+
+sample_df.to_csv(
+    "/content/nlp_prediction_results.csv",
+    index=False
+)
+
+correct_df.to_csv(
+    "/content/correct_predictions.csv",
+    index=False
+)
+
+wrong_df.to_csv(
+    "/content/wrong_predictions.csv",
+    index=False
+)
+
+print("\nSaved files:")
+print("/content/nlp_prediction_results.csv")
+print("/content/correct_predictions.csv")
+print("/content/wrong_predictions.csv")

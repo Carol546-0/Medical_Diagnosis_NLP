@@ -1,0 +1,72 @@
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import classification_report
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    recall_score
+)
+# Load
+df = pd.read_csv("/content/cleaned_dataset50.csv")
+
+#split features
+X = df.drop("diseases", axis=1)
+y = df["diseases"]
+
+#Encode disease labels
+
+encoder = LabelEncoder()
+
+y_encoded = encoder.fit_transform(y)
+
+#split train and test
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y_encoded,
+    test_size=0.2,
+    stratify=y_encoded,
+    random_state=42
+)
+
+#Logistic regression model
+
+model = LogisticRegression(
+    max_iter=3000,
+    n_jobs=-1
+)
+
+model.fit(X_train, y_train)
+
+#Evaluate
+
+preds = model.predict(X_test)
+
+accuracy = accuracy_score(y_test, preds)
+
+print("Accuracy:", accuracy)
+
+print(classification_report(y_test, preds))
+recall_macro = recall_score(
+    y_test,
+    preds,
+    average="macro"
+)
+
+recall_weighted = recall_score(
+    y_test,
+    preds,
+    average="weighted"
+)
+
+print(f"Macro Recall: {recall_macro:.4f}")
+print(f"Weighted Recall: {recall_weighted:.4f}")
+
+import pickle
+
+pickle.dump(model, open("disease_model2.pkl", "wb"))
+pickle.dump(encoder, open("label_encoder2.pkl", "wb"))
+pickle.dump(list(X.columns), open("symptom_columns2.pkl", "wb"))

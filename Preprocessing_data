@@ -1,0 +1,48 @@
+import pandas as pd
+
+# Load
+df = pd.read_csv("/content/Final_Augmented_dataset_Diseases_and_Symptoms.csv")
+
+# Normalize disease names
+df["diseases"] = df["diseases"].str.lower().str.strip()
+
+# Remove duplicates
+df = df.drop_duplicates()
+
+# Count diseases
+disease_counts = df["diseases"].value_counts()
+
+# Remove rare diseases
+MIN_SAMPLES = 50
+
+valid_diseases = disease_counts[disease_counts >= MIN_SAMPLES].index
+
+df = df[df["diseases"].isin(valid_diseases)]
+
+# Fill missing values
+df = df.fillna(0)
+
+# Remove sparse symptom columns.. having all almost 0
+symptom_cols = df.columns.drop("diseases")
+
+zero_percentage = (df[symptom_cols] == 0).mean()
+
+cols_to_remove = zero_percentage[zero_percentage > 0.995].index
+
+df = df.drop(columns=cols_to_remove)
+
+# Recalculate symptom columns
+symptom_cols = df.columns.drop("diseases")
+
+# Reduce memory usage
+df[symptom_cols] = df[symptom_cols].astype("uint8")
+
+# Reset index
+df = df.reset_index(drop=True)
+
+# Save cleaned dataset
+df.to_csv("/content/cleaned_dataset50.csv", index=False)
+
+# Final info
+print(df.shape)
+print("Diseases:", df["diseases"].nunique())
